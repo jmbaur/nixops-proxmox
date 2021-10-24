@@ -1,4 +1,6 @@
+from configparser import ConfigParser
 import json
+import os
 import time
 from typing import List, Literal
 from urllib.parse import urljoin
@@ -50,6 +52,8 @@ class ProxmoxDefinition(backends.MachineDefinition):
 class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     """State of a Proxmox machine."""
 
+    url: str
+    api_token: str
     nodename = util.attr_property("proxmox.nodename", None)
     client_public_key = util.attr_property("proxmox.clientPublicKey", None)
     private_ipv4 = util.attr_property("privateIpv4", None)
@@ -60,22 +64,24 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
         return "proxmox"
 
     def __init__(self, depl: deployment.Deployment, name: str, id: state.RecordId):
+        self._pve_config()
         super().__init__(depl, name, id)
+
+    def _pve_config(self):
+        config = ConfigParser()
+        config.read(os.path.join(os.path.expanduser("~"), ".proxmox", "credentials"))
+        self.url = config.get("default", "URL")
+        self.api_token = config.get("default", "API_TOKEN")
 
     def _pve_session(self) -> requests.Session:
         session = requests.Session()
         session.verify = False
         session.adapters
-        session.headers.update(
-            {
-                # TODO(jared): behind a firewall, just for development
-                "Authorization": "PVEAPIToken=root@pam!nixops=9cdc3c5a-2d6e-4f4d-88f7-629534d97339"
-            }
-        )
+        session.headers.update({"Authorization": f"PVEAPIToken={self.api_token}"})
         return session
 
     def _pve_url(self, path: str) -> str:
-        return urljoin("https://192.168.1.2:8006", path)
+        return urljoin(self.url, path)
 
     def get_ssh_private_key_file(self):
         return self._ssh_private_key_file or self.write_ssh_private_key(
@@ -200,24 +206,6 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
         vm_id = self._pve_next_vm_id()
         self.vm_id = str(vm_id)
 
-        print(
-            json.dumps(
-                {
-                    "agent": 1,
-                    "cores": defn.cores,
-                    "ide2": defn.ide2,
-                    "memory": defn.memory,
-                    "name": defn.name,
-                    "net0": defn.net0,
-                    "ostype": "l26",
-                    "scsi0": defn.scsi0,
-                    "scsihw": defn.scsihw,
-                    "sockets": defn.sockets,
-                    "start": 0,
-                    "vmid": vm_id,
-                }
-            )
-        )
         response = pve.post(
             self._pve_url(f"/api2/json/nodes/{defn.nodename}/qemu"),
             params={
@@ -236,7 +224,6 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
             },
         )
         pve.close()
-        print(response)
         if response.status_code != 200:
             return False
 
