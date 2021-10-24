@@ -1,13 +1,9 @@
 {
-  network = {
-    description = "Proxmox network";
-    storage.legacy = {
-      databasefile = "~/.nixops/deployments.nixops";
-    };
-  };
+  network.description = "Proxmox network";
 
-  machine = { config, pkgs, ... }:
-    {
-      deployment.targetEnv = "proxmox";
-    };
+  # needed for nixops v2
+  network.storage.legacy.databasefile = "~/.nixops/deployments.nixops";
+
+  machine = { ... }:
+    { deployment.targetEnv = "proxmox"; };
 }

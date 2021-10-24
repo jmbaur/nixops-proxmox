@@ -3,8 +3,9 @@ let
   overrides = import ./overrides.nix { inherit pkgs; };
 in
 pkgs.mkShell {
-  nativeBuildInputs = [
-    pkgs.poetry
+  nativeBuildInputs = with pkgs; [
+    poetry
+    sqlite
   ];
   buildInputs = [
     (pkgs.poetry2nix.mkPoetryEnv {

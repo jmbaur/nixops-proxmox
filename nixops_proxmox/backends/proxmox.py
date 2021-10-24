@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Literal, Mapping, Optional, Sequence, Union
+from typing import Dict, Literal, List
 from urllib.parse import urljoin
 
 from nixops import backends, deployment, known_hosts, nix_expr, resources, state, util
@@ -14,34 +14,20 @@ SATA_PORTS = 8
 urllib3.disable_warnings()
 
 
-def get_pve_url(path: str) -> str:
-    return urljoin("https://192.168.1.2:8006", path)
-
-
-def get_pve_session() -> requests.Session:
-    session = requests.Session()
-    session.verify = False
-    session.adapters
-    session.headers.update(
-        {
-            # TODO(jared): behind a firewall, just for development
-            "Authorization": "PVEAPIToken=root@pam!nixops=9cdc3c5a-2d6e-4f4d-88f7-629534d97339"
-        }
-    )
-    return session
-
-
-class DiskOptions(resources.ResourceOptions):
-    port: int
-    size: int
-    baseImage: Optional[str]
-
-
 class ProxmoxVMOptions(resources.ResourceOptions):
-    disks: Mapping[str, DiskOptions]
-    memorySize: int
-    vcpu: Optional[int]
-    vmFlags: Sequence[str]
+    vcpu: int
+    # baseImage: Optional[str]
+    # baseImageSize: int
+    # cmdline: str
+    # domainType: str
+    # extraDevicesXML: str
+    # extraDomainXML: str
+    # headless: bool
+    # initrd: str
+    # kernel: str
+    # memorySize: int
+    # networks: Sequence[str]
+    # storagePool: str
 
 
 class ProxmoxOptions(backends.MachineOptions):
@@ -64,16 +50,16 @@ class ProxmoxDefinition(backends.MachineDefinition):
 class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     """State of a Proxmox machine."""
 
+    client_public_key = util.attr_property("proxmox.clientPublicKey", None)
+    vcpu = util.attr_property("proxmox.vcpu", None)
     private_ipv4 = util.attr_property("privateIpv4", None)
-    client_public_key = util.attr_property("libvirtd.clientPublicKey", None)
-    client_private_key = util.attr_property("libvirtd.clientPrivateKey", None)
-    primary_net = util.attr_property("libvirtd.primaryNet", None)
-    primary_mac = util.attr_property("libvirtd.primaryMAC", None)
-    domain_xml = util.attr_property("libvirtd.domainXML", None)
-    disk_path = util.attr_property("libvirtd.diskPath", None)
-    storage_volume_name = util.attr_property("libvirtd.storageVolume", None)
-    storage_pool_name = util.attr_property("libvirtd.storagePool", None)
-    vcpu = util.attr_property("libvirtd.vcpu", None)
+    client_private_key = util.attr_property("proxmox.clientPrivateKey", None)
+    # primary_net = util.attr_property("proxmox.primaryNet", None)
+    # primary_mac = util.attr_property("proxmox.primaryMAC", None)
+    # domain_xml = util.attr_property("proxmox.domainXML", None)
+    # disk_path = util.attr_property("proxmox.diskPath", None)
+    # storage_volume_name = util.attr_property("proxmox.storageVolume", None)
+    # storage_pool_name = util.attr_property("proxmox.storagePool", None)
 
     @classmethod
     def get_type(cls):
@@ -81,7 +67,21 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
 
     def __init__(self, depl: deployment.Deployment, name: str, id: state.RecordId):
         super().__init__(depl, name, id)
-        self._disk_attached = False
+
+    def _pve_session(self) -> requests.Session:
+        session = requests.Session()
+        session.verify = False
+        session.adapters
+        session.headers.update(
+            {
+                # TODO(jared): behind a firewall, just for development
+                "Authorization": "PVEAPIToken=root@pam!nixops=9cdc3c5a-2d6e-4f4d-88f7-629534d97339"
+            }
+        )
+        return session
+
+    def _pve_url(self, path: str) -> str:
+        return urljoin("https://192.168.1.2:8006", path)
 
     def get_ssh_private_key_file(self):
         return self._ssh_private_key_file or self.write_ssh_private_key(
@@ -96,6 +96,11 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
             "-i",
             self.get_ssh_private_key_file(),
         ]
+
+    def get_ssh_name(self):
+        # TODO(jared): figure this out
+        # self.private_ipv4 = self._parse_ip()
+        return self.private_ipv4
 
     def get_physical_spec(self):
         return {
@@ -114,8 +119,10 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
 
     def _get_vm_status(self) -> Literal["running", "stopped", "nonexistant", None]:
         """Return the status ("running", etc.) of a VM."""
-        pve = get_pve_session()
-        response = pve.get(get_pve_url("/api2/json/nodes/pve/qemu/602/status/current"))
+        pve = self._pve_session()
+        response = pve.get(
+            self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}/status/current")
+        )
         if response.status_code != 200:
             return "nonexistant"
 
@@ -130,22 +137,24 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
 
         return status
 
-    def _start(self) -> bool:
-        pve = get_pve_session()
-        response = pve.post(get_pve_url("/api2/json/nodes/pve/qemu/602/status/start"))
+    def _pve_start(self) -> bool:
+        pve = self._pve_session()
+        response = pve.post(
+            self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}/status/start")
+        )
         pve.close()
         if response.status_code != 200:
             return False
         self.state = self.STARTING
         return True
 
-    def _stop(self, *, stop_type: Literal["stop", "shutdown"]) -> bool:
+    def _pve_stop(self, *, stop_type: Literal["stop", "shutdown"]) -> bool:
         if self.state == self.STOPPED:
             return True
 
-        pve = get_pve_session()
+        pve = self._pve_session()
         response = pve.post(
-            get_pve_url(f"/api2/json/nodes/pve/qemu/602/status/{stop_type}")
+            self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}/status/{stop_type}")
         )
         if response.status_code != 200:
             return False
@@ -162,55 +171,44 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     def _update_ip(self):
         pass
 
-    #     res = self._logged_exec(
-    #         [
-    #             "VBoxManage",
-    #             "guestproperty",
-    #             "get",
-    #             self.vm_id,
-    #             "/Proxmox/GuestInfo/Net/1/V4/IP",
-    #         ],
-    #         capture_stdout=True,
-    #     ).rstrip()
-    #     if res[0:7] != "Value: ":
-    #         return
-    #     new_address = res[7:]
-    #     known_hosts.update(self.private_ipv4, new_address, self.public_host_key)
-    #     self.private_ipv4 = new_address
-
-    def _update_disk(self, name, state):
-        pass
-
-    #     disks = self.disks
-    #     if state is None:
-    #         disks.pop(name, None)
-    #     else:
-    #         disks[name] = state
-    #     self.disks = disks
-
     def _wait_for_ip(self):
         pass
 
-    #     self.log_start("waiting for IP address...")
-    #     while True:
-    #         self._update_ip()
-    #         if self.private_ipv4 is not None:
-    #             break
-    #         time.sleep(1)
-    #         self.log_continue(".")
-    #     self.log_end(" " + self.private_ipv4)
+    def _pve_next_vm_id(self) -> int:
+        pve = self._pve_session()
+        response = pve.get(self._pve_url("/api2/json/nodes/pve/qemu"))
+        data = json.loads(response.text)
+        pve.close()
+        ids: List[int] = []
+        for vm in data["data"]:
+            ids.append(vm["vmid"])
 
-    def _create(self) -> bool:
-        pve = get_pve_session()
+        ids.sort()
+        lowest: int = 100
+        for id in ids:
+            if id == lowest:
+                lowest += 1
+            else:
+                break
+
+        return lowest
+
+    def _pve_create(self) -> bool:
+        pve = self._pve_session()
+
+        vm_id = self._pve_next_vm_id()
+        self.vm_id = str(vm_id)
+
         response = pve.post(
-            get_pve_url("/api2/json/nodes/pve/qemu"),
+            self._pve_url("/api2/json/nodes/pve/qemu"),
             params={
-                "vmid": 602,
+                "vmid": vm_id,
                 "agent": "enabled=1",
-                "description": "TODO",  # shows up in "Notes" section
+                "description": "TODO",
                 "name": "TODO",
                 "ostype": "l26",
-                "start": 0,  # TODO(jared): set to 1
+                "start": 0,
+                "cores": self.vcpu,
             },
         )
         pve.close()
@@ -228,13 +226,24 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
 
         if not self.vm_id:
             self.log("Creating VM...")
-            success = self._create()
+            success = self._pve_create()
             if not success:
                 self.logger.error("Failed to create VM")
                 return
 
-            self.vm_id = self._vm_id()
-            self._start()
+            self._pve_start()
+
+    def _pve_destroy(self) -> bool:
+        pve = self._pve_session()
+        response = pve.delete(
+            self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}"),
+            params={"purge": 1, "destroy-unreferenced-disks": 1},
+        )
+        pve.close()
+        if response.status_code != 200:
+            return False
+
+        return True
 
     def destroy(self, wipe: bool = False) -> bool:
         if not self.vm_id:
@@ -247,44 +256,35 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
 
         self.log("destroying VM...")
 
-        pve = get_pve_session()
-        status = self._get_vm_status()
-        if status == "nonexistant":
+        if self._get_vm_status() == "nonexistant":
             self.log("VM does not exist")
             self.state = self.MISSING
             return True
 
-        if self.state != self.STOPPED:
-            success = self._stop(stop_type="stop")
-            if not success:
-                self.logger.error("Could not stop VM")
-                return False
-
-        response = pve.delete(
-            get_pve_url("/api2/json/nodes/pve/qemu/602"),
-            params={"purge": 1, "destroy-unreferenced-disks": 1},
-        )
-        if response.status_code != 200:
-            self.logger.error("Failed to destroy VM")
+        success = self._pve_stop(stop_type="stop")
+        if not success:
+            self.logger.error("Could not stop VM")
             return False
 
-        pve.close()
+        success = self._pve_destroy()
+        if not success:
+            self.logger.error("could not delete VM")
+            return False
 
-        self.state = self.MISSING
         return True
 
     def stop(self):
         assert self.vm_id
-        success = self._stop(stop_type="shutdown")
+        success = self._pve_stop(stop_type="shutdown")
         if not success:
             self.logger.error("Could not stop VM")
             return
         state = self._get_vm_status()
         if state == "running":
             self.log_start("shutting down... ")
-            pve = get_pve_session()
+            pve = self._pve_session()
             response = pve.post(
-                get_pve_url("/api2/json/nodes/pve/qemu/602/status/shutdown")
+                self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}/status/shutdown")
             )
             pve.close()
             if response.status_code != 200:
@@ -307,38 +307,10 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
             return
         self.log("Starting...")
         prev_ipv4 = self.private_ipv4
-        self._start()
+        self._pve_start()
         self._wait_for_ip()
         self.ssh_pinged = False
         self._ssh_pinged_this_time = False
         if prev_ipv4 != self.private_ipv4:
             self.warn("IP address has changed, you may need to run ‘nixops deploy’")
         self.wait_for_ssh(check=True)
-
-    def _check(self, res):
-        if not self.vm_id:
-            res.exists = False
-            return
-        state = self._get_vm_status(can_fail=True)
-        if state is None:
-            with self.depl._db:
-                self.vm_id = None
-                self.private_ipv4 = None
-                self.sata_controller_created = False
-                self.public_host_key = None
-                self.private_host_key = None
-                self.disks = {}
-                self.state = self.MISSING
-                return
-
-        res.exists = True
-        self.log(f"VM state is ‘{state}’")
-        if state == "poweroff" or state == "aborted":
-            res.is_up = False
-            self.state = self.STOPPED
-        elif state == "running":
-            res.is_up = True
-            self._update_ip()
-            backends.MachineState._check(self, res)
-        else:
-            self.state = self.UNKNOWN
