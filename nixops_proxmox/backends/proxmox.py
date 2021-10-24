@@ -1,33 +1,25 @@
 import json
 import time
-from typing import Dict, Literal, List
+from typing import List, Literal
 from urllib.parse import urljoin
 
-from nixops import backends, deployment, known_hosts, nix_expr, resources, state, util
+from nixops import backends, deployment, resources, state, util
 import requests
 import urllib3
-
-
-SATA_PORTS = 8
 
 
 urllib3.disable_warnings()
 
 
 class ProxmoxVMOptions(resources.ResourceOptions):
-    vcpu: int
-    # baseImage: Optional[str]
-    # baseImageSize: int
-    # cmdline: str
-    # domainType: str
-    # extraDevicesXML: str
-    # extraDomainXML: str
-    # headless: bool
-    # initrd: str
-    # kernel: str
-    # memorySize: int
-    # networks: Sequence[str]
-    # storagePool: str
+    cores: int
+    ide2: str
+    memory: int
+    net0: str
+    nodename: str
+    scsi0: str
+    scsihw: str
+    sockets: int
 
 
 class ProxmoxOptions(backends.MachineOptions):
@@ -45,21 +37,23 @@ class ProxmoxDefinition(backends.MachineDefinition):
 
     def __init__(self, name, config):
         super().__init__(name, config)
+        self.cores = self.config.proxmox.cores
+        self.ide2 = self.config.proxmox.ide2
+        self.memory = self.config.proxmox.memory
+        self.net0 = self.config.proxmox.net0
+        self.nodename = self.config.proxmox.nodename
+        self.scsi0 = self.config.proxmox.scsi0
+        self.scsihw = self.config.proxmox.scsihw
+        self.sockets = self.config.proxmox.sockets
 
 
 class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     """State of a Proxmox machine."""
 
+    nodename = util.attr_property("proxmox.nodename", None)
     client_public_key = util.attr_property("proxmox.clientPublicKey", None)
-    vcpu = util.attr_property("proxmox.vcpu", None)
     private_ipv4 = util.attr_property("privateIpv4", None)
     client_private_key = util.attr_property("proxmox.clientPrivateKey", None)
-    # primary_net = util.attr_property("proxmox.primaryNet", None)
-    # primary_mac = util.attr_property("proxmox.primaryMAC", None)
-    # domain_xml = util.attr_property("proxmox.domainXML", None)
-    # disk_path = util.attr_property("proxmox.diskPath", None)
-    # storage_volume_name = util.attr_property("proxmox.storageVolume", None)
-    # storage_pool_name = util.attr_property("proxmox.storagePool", None)
 
     @classmethod
     def get_type(cls):
@@ -121,7 +115,9 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
         """Return the status ("running", etc.) of a VM."""
         pve = self._pve_session()
         response = pve.get(
-            self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}/status/current")
+            self._pve_url(
+                f"/api2/json/nodes/{self.nodename}/qemu/{self.vm_id}/status/current"
+            )
         )
         if response.status_code != 200:
             return "nonexistant"
@@ -140,7 +136,9 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     def _pve_start(self) -> bool:
         pve = self._pve_session()
         response = pve.post(
-            self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}/status/start")
+            self._pve_url(
+                f"/api2/json/nodes/{self.nodename}/qemu/{self.vm_id}/status/start"
+            )
         )
         pve.close()
         if response.status_code != 200:
@@ -154,7 +152,9 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
 
         pve = self._pve_session()
         response = pve.post(
-            self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}/status/{stop_type}")
+            self._pve_url(
+                f"/api2/json/nodes/{self.nodename}/qemu/{self.vm_id}/status/{stop_type}"
+            )
         )
         if response.status_code != 200:
             return False
@@ -176,12 +176,13 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
 
     def _pve_next_vm_id(self) -> int:
         pve = self._pve_session()
-        response = pve.get(self._pve_url("/api2/json/nodes/pve/qemu"))
+        response = pve.get(self._pve_url(f"/api2/json/nodes/{self.nodename}/qemu"))
         data = json.loads(response.text)
         pve.close()
         ids: List[int] = []
-        for vm in data["data"]:
-            ids.append(vm["vmid"])
+        if data["data"] is not None:
+            for vm in data["data"]:
+                ids.append(vm["vmid"])
 
         ids.sort()
         lowest: int = 100
@@ -193,25 +194,49 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
 
         return lowest
 
-    def _pve_create(self) -> bool:
+    def _pve_create(self, defn: ProxmoxDefinition) -> bool:
         pve = self._pve_session()
 
         vm_id = self._pve_next_vm_id()
         self.vm_id = str(vm_id)
 
+        print(
+            json.dumps(
+                {
+                    "agent": 1,
+                    "cores": defn.cores,
+                    "ide2": defn.ide2,
+                    "memory": defn.memory,
+                    "name": defn.name,
+                    "net0": defn.net0,
+                    "ostype": "l26",
+                    "scsi0": defn.scsi0,
+                    "scsihw": defn.scsihw,
+                    "sockets": defn.sockets,
+                    "start": 0,
+                    "vmid": vm_id,
+                }
+            )
+        )
         response = pve.post(
-            self._pve_url("/api2/json/nodes/pve/qemu"),
+            self._pve_url(f"/api2/json/nodes/{defn.nodename}/qemu"),
             params={
-                "vmid": vm_id,
-                "agent": "enabled=1",
-                "description": "TODO",
-                "name": "TODO",
+                "agent": 1,
+                "cores": defn.cores,
+                "ide2": defn.ide2,
+                "memory": defn.memory,
+                "name": defn.name,
+                "net0": defn.net0,
                 "ostype": "l26",
+                "scsi0": defn.scsi0,
+                "scsihw": defn.scsihw,
+                "sockets": defn.sockets,
                 "start": 0,
-                "cores": self.vcpu,
+                "vmid": vm_id,
             },
         )
         pve.close()
+        print(response)
         if response.status_code != 200:
             return False
 
@@ -220,13 +245,14 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     def create(self, defn: ProxmoxDefinition, check, allow_reboot, allow_recreate):
         assert isinstance(defn, ProxmoxDefinition)
         self.set_common_state(defn)
+        self.nodename = defn.nodename
 
         if not self.client_public_key:
             (self.client_private_key, self.client_public_key,) = util.create_key_pair()
 
         if not self.vm_id:
             self.log("Creating VM...")
-            success = self._pve_create()
+            success = self._pve_create(defn)
             if not success:
                 self.logger.error("Failed to create VM")
                 return
@@ -236,7 +262,7 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     def _pve_destroy(self) -> bool:
         pve = self._pve_session()
         response = pve.delete(
-            self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}"),
+            self._pve_url(f"/api2/json/nodes/{self.nodename}/qemu/{self.vm_id}"),
             params={"purge": 1, "destroy-unreferenced-disks": 1},
         )
         pve.close()
@@ -284,7 +310,9 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
             self.log_start("shutting down... ")
             pve = self._pve_session()
             response = pve.post(
-                self._pve_url(f"/api2/json/nodes/pve/qemu/{self.vm_id}/status/shutdown")
+                self._pve_url(
+                    f"/api2/json/nodes/{self.nodename}/qemu/{self.vm_id}/status/shutdown"
+                )
             )
             pve.close()
             if response.status_code != 200:
