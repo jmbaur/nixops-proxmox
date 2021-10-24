@@ -70,6 +70,7 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     def _pve_config(self):
         config = ConfigParser()
         config.read(os.path.join(os.path.expanduser("~"), ".proxmox", "credentials"))
+        # TODO(jared): Use the `default` section as a fallback.
         self.url = config.get("default", "URL")
         self.api_token = config.get("default", "API_TOKEN")
 
