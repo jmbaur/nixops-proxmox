@@ -13,6 +13,11 @@ import urllib3
 urllib3.disable_warnings()
 
 
+GLOBAL_storage = "local"
+GLOBAL_iso_url = "https://nixops-proxmox.s3.us-west-2.amazonaws.com/nixos-21.05.3896.b0274abf850-x86_64-linux.iso"
+GLOBAL_iso_filename = "nixos-21.05.3896.b0274abf850-x86_64-linux.iso"
+
+
 class ProxmoxVMOptions(resources.ResourceOptions):
     cores: int
     ide2: str
@@ -66,6 +71,43 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
     def __init__(self, depl: deployment.Deployment, name: str, id: state.RecordId):
         self._pve_config()
         super().__init__(depl, name, id)
+
+    def _pve_has_iso(self) -> bool:
+        pve = self._pve_session()
+        response = pve.get(
+            self._pve_url(
+                f"/api2/json/nodes/{self.nodename}/storage/{GLOBAL_storage}/content"
+            )
+        )
+        pve.close()
+
+        if response.status_code != 200:
+            return False
+
+        data = json.loads(response.text)
+        uploads = data["data"]
+        if uploads is None:
+            return False
+
+        for upload in uploads:
+            if upload["volid"] == f"{GLOBAL_storage}:iso/{GLOBAL_iso_filename}":
+                return True
+
+        return False
+
+    def _pve_upload_iso(self):
+        pve = self._pve_session()
+        pve.post(
+            self._pve_url(
+                f"/api2/json/nodes/{self.nodename}/storage/{GLOBAL_storage}/download-url"
+            ),
+            params={
+                "url": GLOBAL_iso_url,
+                "filename": GLOBAL_iso_filename,
+                "content": "iso",
+            },
+        )
+        pve.close()
 
     def _pve_config(self):
         config = ConfigParser()
@@ -239,6 +281,18 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
             (self.client_private_key, self.client_public_key,) = util.create_key_pair()
 
         if not self.vm_id:
+            has_iso = False
+            downloading = False
+            while not has_iso:
+                has_iso = self._pve_has_iso()
+                if has_iso:
+                    break
+                if not downloading:
+                    self.log("ISO not found, uploading to Proxmox node...")
+                    self._pve_upload_iso()
+                    downloading = True
+                time.sleep(10)
+
             self.log("Creating VM...")
             success = self._pve_create(defn)
             if not success:
