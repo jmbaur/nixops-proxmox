@@ -291,7 +291,7 @@ class ProxmoxState(backends.MachineState[ProxmoxDefinition]):
                     self.log("ISO not found, uploading to Proxmox node...")
                     self._pve_upload_iso()
                     downloading = True
-                time.sleep(10)
+                time.sleep(5)
 
             self.log("Creating VM...")
             success = self._pve_create(defn)
